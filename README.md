@@ -1,4 +1,4 @@
-# CNTS = Containers Simplified : A Mock Containerization Tool
+# Contain-it : A Mock Containerization Tool
 
 # MVP Status :  not ready
 TODO : Implement Root-fs extraction
