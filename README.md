@@ -36,12 +36,6 @@ This is a simple mock containerization tool written in Go. It mimics the behavio
    ./cnts pull ubuntu
    ```
 
-> **Note**: You need to run these commands as root:
-> ```sh
-> root@device:~# ./cnts run <image> <command>
-> root@device:~# ./cnts pull <image>
-> ```
-
 ### Pull Script
 
 The `pull` script is a helper bash script to fetch Docker images, export their filesystem, and save it to the `assets` directory.
