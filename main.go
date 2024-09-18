@@ -1,18 +1,12 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"syscall"
-
-	"github.com/codeclysm/extract"
 )
 
 func main() {
@@ -42,19 +36,16 @@ func main() {
 }
 
 func run(image, call string) {
-	tar := fmt.Sprintf("./assets/%s.tar.gz", image)
+	rootfs := fmt.Sprintf("./rootfs/%s", image)
 
-	if _, err := os.Stat(tar); errors.Is(err, os.ErrNotExist) {
-		panic(err)
+	if _, err := os.Stat(rootfs); os.IsNotExist(err) {
+		fmt.Printf("Root filesystem for %s not found. Pulling the image...\n", image)
+		pullImage(image)
 	}
-
-	dir := createTempDir(tar)
-	defer os.RemoveAll(dir)
-	must(unTar(tar, dir))
 
 	fmt.Printf("Running command %v in a new container\n", call)
 
-	cmd := exec.Command("/proc/self/exe", append([]string{"child", dir, call}, os.Args[4:]...)...)
+	cmd := exec.Command("/proc/self/exe", append([]string{"child", rootfs, call}, os.Args[4:]...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
@@ -85,52 +76,66 @@ func child() {
 	must(syscall.Chroot(root))
 	must(os.Chdir("/"))
 	must(syscall.Mount("proc", "proc", "proc", 0, ""))
-	must(syscall.Mount("thing", "mytemp", "tmpfs", 0, ""))
+	must(syscall.Mount("tmpfs", "/tmp", "tmpfs", 0, ""))
 
 	must(cmd.Run())
 
 	must(syscall.Unmount("proc", 0))
-	must(syscall.Unmount("thing", 0))
+	must(syscall.Unmount("/tmp", 0))
 }
 
 func pullImage(image string) {
-	cmd := exec.Command("./pull", image)
-	cmd.Stdin = os.Stdin
+	rootfsDir := fmt.Sprintf("./rootfs/%s", image)
+
+	if _, err := os.Stat(rootfsDir); !os.IsNotExist(err) {
+		fmt.Printf("Root filesystem for %s already exists. Skipping creation.\n", image)
+		return
+	}
+
+	fmt.Printf("Creating root filesystem for %s...\n", image)
+	must(os.MkdirAll(rootfsDir, 0755))
+
+	// Use debootstrap to create the root filesystem
+	cmd := exec.Command("sudo", "debootstrap",
+		"--arch=amd64",
+		image,
+		rootfsDir,
+		"http://archive.ubuntu.com/ubuntu/")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	must(cmd.Run())
+
+	fmt.Printf("Root filesystem for %s created at %s\n", image, rootfsDir)
+
+	fmt.Printf("Image %s pulled and root filesystem created successfully.\n", image)
 }
 
 func cg() {
 	cgroups := "/sys/fs/cgroup/"
 	pids := filepath.Join(cgroups, "pids")
-	os.Mkdir(filepath.Join(pids, "user"), 0755)
-	must(os.WriteFile(filepath.Join(pids, "user/pids.max"), []byte("20"), 0700))
+
+	// Check if the cgroup filesystem is mounted
+	if _, err := os.Stat(cgroups); os.IsNotExist(err) {
+		fmt.Println("cgroup filesystem is not mounted. Attempting to mount...")
+		must(os.MkdirAll(cgroups, 0755))
+		must(syscall.Mount("cgroup", cgroups, "cgroup", 0, ""))
+	}
+
+	// Check if the pids subsystem exists
+	if _, err := os.Stat(pids); os.IsNotExist(err) {
+		fmt.Println("pids cgroup subsystem not found. Creating it...")
+		must(os.MkdirAll(pids, 0755))
+		must(os.WriteFile(filepath.Join(pids, "cgroup.procs"), []byte{}, 0600))
+		must(os.WriteFile(filepath.Join(pids, "pids.max"), []byte("max"), 0600))
+	}
+
+	// Create a new cgroup for our container
+	containerCgroup := filepath.Join(pids, "container")
+	must(os.Mkdir(containerCgroup, 0755))
+	must(os.WriteFile(filepath.Join(containerCgroup, "pids.max"), []byte("20"), 0600))
 	// Removes the new cgroup in place after the container exits
-	must(os.WriteFile(filepath.Join(pids, "user/notify_on_release"), []byte("1"), 0700))
-	must(os.WriteFile(filepath.Join(pids, "user/cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0700))
-}
-
-func createTempDir(name string) string {
-	var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
-
-	prefix := nonAlphanumericRegex.ReplaceAllString(name, "_")
-	dir, err := os.MkdirTemp("", prefix)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return dir
-}
-
-func unTar(source string, dst string) error {
-	r, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	ctx := context.Background()
-	return extract.Archive(ctx, r, dst, nil)
+	must(os.WriteFile(filepath.Join(containerCgroup, "notify_on_release"), []byte("1"), 0600))
+	must(os.WriteFile(filepath.Join(containerCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0600))
 }
 
 func must(err error) {
